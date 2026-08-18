@@ -1,0 +1,154 @@
+name: .NET 10 CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: dotnet-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    if: ${{ hashFiles('**/*.csproj', '**/*.fsproj', '**/*.vbproj', '**/*.sln', '**/*.slnx', 'global.json') != '' }}
+    runs-on: windows-latest
+    env:
+      DOTNET_VERSION: '10.0.400'
+      CONFIGURATION: Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: false
+
+      - name: Show .NET SDK
+        shell: pwsh
+        run: dotnet --info
+
+      - name: Resolve solution or project
+        id: resolve
+        shell: pwsh
+        run: |
+          $solution = Get-ChildItem -Path . -Recurse -File -Include *.sln,*.slnx |
+            Where-Object { $_.FullName -notmatch '\\bin\\|\\obj\\' } |
+            Select-Object -First 1
+
+          if ($null -ne $solution) {
+            "target=$($solution.FullName)" >> $env:GITHUB_OUTPUT
+            "kind=solution" >> $env:GITHUB_OUTPUT
+            Write-Host "Using solution: $($solution.FullName)"
+            exit 0
+          }
+
+          $project = Get-ChildItem -Path . -Recurse -File -Include *.csproj,*.fsproj,*.vbproj |
+            Where-Object { $_.FullName -notmatch '\\bin\\|\\obj\\' } |
+            Select-Object -First 1
+
+          if ($null -eq $project) {
+            throw 'No .NET solution or project file was found.'
+          }
+
+          "target=$($project.FullName)" >> $env:GITHUB_OUTPUT
+          "kind=project" >> $env:GITHUB_OUTPUT
+          Write-Host "Using project: $($project.FullName)"
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore "${{ steps.resolve.outputs.target }}"
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build "${{ steps.resolve.outputs.target }}" -c $env:CONFIGURATION --no-restore
+
+      - name: Test
+        shell: pwsh
+        run: |
+          $testProjects = Get-ChildItem -Path . -Recurse -File -Filter *Tests.csproj |
+            Where-Object { $_.FullName -notmatch '\\bin\\|\\obj\\' }
+
+          $testProjects += Get-ChildItem -Path . -Recurse -File -Filter *Test.csproj |
+            Where-Object { $_.FullName -notmatch '\\bin\\|\\obj\\' }
+
+          $testProjects = $testProjects | Sort-Object FullName -Unique
+
+          if ($testProjects.Count -eq 0) {
+            Write-Host 'No conventional test project found; build verification completed.'
+            exit 0
+          }
+
+          foreach ($testProject in $testProjects) {
+            Write-Host "Testing $($testProject.FullName)"
+            dotnet test $testProject.FullName -c $env:CONFIGURATION --no-build --no-restore
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+  publish-windows-x64:
+    name: Publish Windows x64
+    needs: build-and-test
+    if: ${{ needs.build-and-test.result == 'success' && hashFiles('**/*.csproj', '**/*.sln', '**/*.slnx') != '' }}
+    runs-on: windows-latest
+    env:
+      DOTNET_VERSION: '10.0.400'
+      CONFIGURATION: Release
+      RUNTIME: win-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: false
+
+      - name: Resolve publish project
+        id: resolve
+        shell: pwsh
+        run: |
+          $projects = Get-ChildItem -Path . -Recurse -File -Filter *.csproj |
+            Where-Object { $_.FullName -notmatch '\\bin\\|\\obj\\' }
+
+          if ($projects.Count -eq 0) {
+            throw 'No .csproj project found for Windows publish.'
+          }
+
+          $preferred = $projects | Where-Object { (Get-Content $_.FullName -Raw) -match '<OutputType>Exe</OutputType>|<UseWPF>true</UseWPF>|<UseWinForms>true</UseWinForms>' } | Select-Object -First 1
+          $project = if ($null -ne $preferred) { $preferred } else { $projects | Select-Object -First 1 }
+
+          "target=$($project.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "Publishing: $($project.FullName)"
+
+      - name: Publish Windows x64
+        shell: pwsh
+        run: dotnet publish "${{ steps.resolve.outputs.target }}" -c $env:CONFIGURATION -r $env:RUNTIME --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish
+
+      - name: Validate published output
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem ./publish -File
+          if ($files.Count -eq 0) { throw 'Publish output is empty.' }
+          Write-Host "Published files: $($files.Count)"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: dotnet-win-x64
+          path: ./publish
+          if-no-files-found: error
+          retention-days: 14
