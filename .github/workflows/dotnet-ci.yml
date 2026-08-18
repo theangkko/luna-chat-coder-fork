@@ -30,6 +30,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Verify source identity
+        shell: pwsh
+        run: |
+          $actual = git rev-parse HEAD
+          Write-Host "Expected SHA: $env:GITHUB_SHA"
+          Write-Host "Checked out SHA: $actual"
+          if ($actual -ne $env:GITHUB_SHA) {
+            throw 'Checked out commit does not match GITHUB_SHA.'
+          }
+
       - name: Setup .NET 10 SDK
         uses: actions/setup-dotnet@v6
         with:
@@ -111,6 +121,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Verify source identity
+        shell: pwsh
+        run: |
+          $actual = git rev-parse HEAD
+          Write-Host "Expected SHA: $env:GITHUB_SHA"
+          Write-Host "Checked out SHA: $actual"
+          if ($actual -ne $env:GITHUB_SHA) {
+            throw 'Checked out commit does not match GITHUB_SHA.'
+          }
+
       - name: Setup .NET 10 SDK
         uses: actions/setup-dotnet@v6
         with:
@@ -143,7 +163,9 @@ jobs:
         run: |
           $files = Get-ChildItem ./publish -File
           if ($files.Count -eq 0) { throw 'Publish output is empty.' }
+          Write-Host "Commit SHA: $env:GITHUB_SHA"
           Write-Host "Published files: $($files.Count)"
+          $files | ForEach-Object { Write-Host "- $($_.Name) ($($_.Length) bytes)" }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v6
